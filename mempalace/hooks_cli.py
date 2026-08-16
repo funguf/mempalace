@@ -178,7 +178,7 @@ def _count_human_messages(transcript_path: str) -> int:
                             if "<command-message>" in text:
                                 continue
                         count += 1
-                    # Also handle Codex CLI transcript format
+                    # Also handle legacy Codex CLI transcript format
                     # {"type": "event_msg", "payload": {"type": "user_message", "message": "..."}}
                     elif entry.get("type") == "event_msg":
                         payload = entry.get("payload", {})
@@ -186,6 +186,12 @@ def _count_human_messages(transcript_path: str) -> int:
                             msg_text = payload.get("message", "")
                             if isinstance(msg_text, str) and "<command-message>" not in msg_text:
                                 count += 1
+                    elif entry.get("type") == "response_item":
+                        from .normalize import _codex_response_message
+
+                        turn = _codex_response_message(entry.get("payload", {}))
+                        if turn is not None and turn[0] == "user":
+                            count += 1
                 except (json.JSONDecodeError, AttributeError):
                     pass
     except OSError:
@@ -903,7 +909,7 @@ def _extract_recent_messages(transcript_path: str, count: int = _RECENT_MSG_COUN
                         if "<command-message>" in content or "<system-reminder>" in content:
                             continue
                         messages.append(content.strip()[:200])
-                    # Codex CLI format
+                    # Legacy Codex CLI format
                     elif entry.get("type") == "event_msg":
                         payload = entry.get("payload", {})
                         if isinstance(payload, dict) and payload.get("type") == "user_message":
@@ -911,6 +917,12 @@ def _extract_recent_messages(transcript_path: str, count: int = _RECENT_MSG_COUN
                             if isinstance(text, str) and text.strip():
                                 if "<command-message>" not in text:
                                     messages.append(text.strip()[:200])
+                    elif entry.get("type") == "response_item":
+                        from .normalize import _codex_response_message
+
+                        turn = _codex_response_message(entry.get("payload", {}))
+                        if turn is not None and turn[0] == "user":
+                            messages.append(turn[1][:200])
                 except (json.JSONDecodeError, AttributeError):
                     pass
     except OSError:

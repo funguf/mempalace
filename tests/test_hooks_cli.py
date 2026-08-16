@@ -171,6 +171,33 @@ def test_count_human_messages_basic(tmp_path):
     assert _count_human_messages(str(transcript)) == 2
 
 
+def test_count_human_messages_current_codex(tmp_path):
+    transcript = tmp_path / "codex.jsonl"
+    _write_transcript(
+        transcript,
+        [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hello"}],
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "hi"}],
+                },
+            },
+        ],
+    )
+
+    assert _count_human_messages(str(transcript)) == 1
+
+
 def test_count_skips_command_messages(tmp_path):
     transcript = tmp_path / "t.jsonl"
     _write_transcript(
@@ -239,6 +266,25 @@ def test_extract_recent_messages_basic(tmp_path):
     assert len(msgs) == 3
     assert msgs[0] == "msg 2"
     assert msgs[2] == "msg 4"
+
+
+def test_extract_recent_messages_current_codex(tmp_path):
+    transcript = tmp_path / "codex.jsonl"
+    _write_transcript(
+        transcript,
+        [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "remember this"}],
+                },
+            }
+        ],
+    )
+
+    assert _extract_recent_messages(str(transcript)) == ["remember this"]
 
 
 def test_extract_recent_messages_skips_commands(tmp_path):

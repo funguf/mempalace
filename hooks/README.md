@@ -91,24 +91,41 @@ Add to `.codex/hooks.json`:
 
 ```json
 {
-  "Stop": [{
-    "type": "command",
-    "command": "/absolute/path/to/hooks/mempal_save_hook.sh",
-    "timeout": 30
-  }],
-  "PreCompact": [{
-    "type": "command",
-    "command": "/absolute/path/to/hooks/mempal_precompact_hook.sh",
-    "timeout": 30
-  }]
+  "hooks": {
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "mempalace hook run --hook stop --harness codex",
+        "timeout": 30
+      }]
+    }],
+    "PreCompact": [{
+      "hooks": [{
+        "type": "command",
+        "command": "mempalace hook run --hook precompact --harness codex",
+        "timeout": 30
+      }]
+    }],
+    "SessionEnd": [{
+      "hooks": [{
+        "type": "command",
+        "command": "mempalace hook run --hook session-end --harness codex",
+        "timeout": 3
+      }]
+    }]
+  }
 }
 ```
 
+Review changed hook definitions once with Codex's `/hooks` command. The
+`SessionEnd` hook captures short sessions that never reach a periodic Stop
+checkpoint.
+
 **Other harnesses:** the clean-exit save runs through the harness-agnostic
 `mempalace hook run --hook session-end` entry point. This release wires it
-for Claude Code. Antigravity exposes no dedicated session-end event (its
+for Claude Code and Codex. Antigravity exposes no dedicated session-end event (its
 lifecycle hooks are PreToolUse/PostToolUse/PreInvocation/PostInvocation/Stop,
-and MemPalace already saves there via `Stop`); Cursor and Codex can adopt the
+and MemPalace already saves there via `Stop`); Cursor can adopt the
 same entry point as a follow-up wherever their own session-end event is available.
 
 ## Configuration
