@@ -58,6 +58,9 @@ Semantic search. Returns verbatim drawer content with similarity scores.
 | `limit` | integer | No | Max results (default: 5) |
 | `wing` | string | No | Filter by wing |
 | `room` | string | No | Filter by room |
+| `tenant_id` | string | No | Exact tenant scope |
+| `namespace` | string | No | Exact namespace scope |
+| `allowed_tags` | array of strings | No | Return drawers having at least one allowed tag; an empty array denies all results |
 
 **Returns:** `{ query, filters, results: [{ text, wing, room, source_file, similarity }] }`
 
@@ -101,8 +104,35 @@ File verbatim content into the palace. Identical content (same deterministic dra
 | `content` | string | **Yes** | Verbatim content to store |
 | `source_file` | string | No | Where this came from |
 | `added_by` | string | No | Who is filing (default: "mcp") |
+| `tenant_id` | string | No | Tenant identity used for scope and tenant-safe IDs |
+| `chat_id` | string | No | Chat identity; with tenant and message ID, makes retries idempotent |
+| `message_id` | string | No | Message identity; with tenant and chat ID, makes retries idempotent |
+| `namespace` | string | No | Namespace stored for scoped retrieval/deletion |
+| `tags` | array of strings | No | Up to 32 tags, each at most 64 characters |
+| `written_by` | string | No | Original writer identity |
+| `written_from` | string | No | Original transport or producer identity |
 
 **Returns:** `{ success, drawer_id, wing, room }`
+
+Content matching the chat-ingest PII deny-list is refused with
+`{ success: false, error_code: "pii", pattern_type }`; matched secret text is
+never returned.
+
+---
+
+### `mempalace_forget_drawers`
+
+Delete drawers belonging to exactly one tenant and chat, optionally narrowed
+to a namespace. Scope predicates are enforced by the storage query; drawers
+from another tenant or chat are not selected. Irreversible.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `tenant_id` | string | **Yes** | Exact tenant scope |
+| `chat_id` | string | **Yes** | Exact chat scope |
+| `namespace` | string | No | Optional exact namespace scope |
+
+**Returns:** `{ success, deleted }`, where `deleted` counts logical drawers.
 
 ---
 

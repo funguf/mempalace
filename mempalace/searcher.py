@@ -10,6 +10,7 @@ hide drawers the direct path would have found.
 """
 
 import functools
+import json
 import logging
 import math
 import os
@@ -330,8 +331,14 @@ def _hybrid_rank(
     return results
 
 
-def build_where_filter(wing: str = None, room: str = None, source_file: str = None) -> dict:
-    """Build a ChromaDB where filter from optional wing/room/source_file.
+def build_where_filter(
+    wing: str = None,
+    room: str = None,
+    source_file: str = None,
+    tenant_id: str = None,
+    namespace: str = None,
+) -> dict:
+    """Build a ChromaDB where filter from optional equality scopes.
 
     ChromaDB needs a ``$and`` only when ≥2 clauses are present; a single
     clause is returned bare and zero clauses yield an empty filter (#1815).
@@ -343,11 +350,75 @@ def build_where_filter(wing: str = None, room: str = None, source_file: str = No
         clauses.append({"room": room})
     if source_file:
         clauses.append({"source_file": source_file})
+    if tenant_id:
+        clauses.append({"tenant_id": tenant_id})
+    if namespace:
+        clauses.append({"namespace": namespace})
     if not clauses:
         return {}
     if len(clauses) == 1:
         return clauses[0]
     return {"$and": clauses}
+
+
+def _metadata_tags(metadata: dict) -> set[str]:
+    """Decode tags written by current and legacy sidecar integrations."""
+    raw = metadata.get("tags")
+    if raw is None:
+        raw = metadata.get("tags_json")
+    if isinstance(raw, list):
+        return {tag for tag in raw if isinstance(tag, str)}
+    if not isinstance(raw, str) or not raw:
+        return set()
+    try:
+        decoded = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {tag for tag in raw.split(",") if tag}
+    if not isinstance(decoded, list):
+        return set()
+    return {tag for tag in decoded if isinstance(tag, str)}
+
+
+def _metadata_has_allowed_tag(metadata: dict, allowed_tags: list[str]) -> bool:
+    """Apply the sidecar contract's OR semantics; an empty list denies all."""
+    return bool(_metadata_tags(metadata).intersection(allowed_tags))
+
+
+def _metadata_in_scope(
+    metadata: dict,
+    *,
+    wing=None,
+    room=None,
+    source_file=None,
+    tenant_id=None,
+    namespace=None,
+    allowed_tags=None,
+    since_dt=None,
+    before_dt=None,
+) -> bool:
+    """Single scope predicate shared by vector and SQLite fallback paths."""
+    if wing and metadata.get("wing") != wing:
+        return False
+    if room and metadata.get("room") != room:
+        return False
+    if source_file and metadata.get("source_file") != source_file:
+        return False
+    if tenant_id and metadata.get("tenant_id") != tenant_id:
+        return False
+    if namespace and metadata.get("namespace") != namespace:
+        return False
+    if allowed_tags is not None and not _metadata_has_allowed_tag(metadata, allowed_tags):
+        return False
+    if (since_dt is not None or before_dt is not None) and not filed_at_in_window(
+        metadata.get("filed_at"), since_dt, before_dt
+    ):
+        return False
+    return True
+
+
+def _scoped_candidate_pool_size(n_results: int, date_window_active: bool, allowed_tags) -> int:
+    base = _candidate_pool_size(n_results, date_window_active)
+    return max(base, 500) if allowed_tags is not None else base
 
 
 def _extract_drawer_ids_from_closet(closet_doc: str) -> list:
@@ -805,6 +876,9 @@ def _bm25_only_via_sqlite(
     stop_words: frozenset = frozenset(),
     since_dt=None,
     before_dt=None,
+    tenant_id: str = None,
+    namespace: str = None,
+    allowed_tags: list[str] | None = None,
 ) -> dict:
     """BM25-only search reading drawers directly from chroma.sqlite3.
 
@@ -836,7 +910,13 @@ def _bm25_only_via_sqlite(
     def _metadata_filter_sql(row_id_expr: str) -> tuple[str, list[str]]:
         clauses = []
         params = []
-        for key, value in (("wing", wing), ("room", room), ("source_file", source_file)):
+        for key, value in (
+            ("wing", wing),
+            ("room", room),
+            ("source_file", source_file),
+            ("tenant_id", tenant_id),
+            ("namespace", namespace),
+        ):
             if not value:
                 continue
             clauses.append(
@@ -968,7 +1048,14 @@ def _bm25_only_via_sqlite(
         if not candidate_ids:
             return {
                 "query": query,
-                "filters": {"wing": wing, "room": room, "source_file": source_file},
+                "filters": {
+                    "wing": wing,
+                    "room": room,
+                    "source_file": source_file,
+                    "tenant_id": tenant_id,
+                    "namespace": namespace,
+                    "allowed_tags": allowed_tags,
+                },
                 "total_before_filter": 0,
                 "results": [],
                 "fallback": "bm25_only_via_sqlite",
@@ -1009,13 +1096,17 @@ def _bm25_only_via_sqlite(
     candidates = []
     for d in drawers.values():
         meta = d["metadata"]
-        if wing and meta.get("wing") != wing:
-            continue
-        if room and meta.get("room") != room:
-            continue
-        if source_file and meta.get("source_file") != source_file:
-            continue
-        if window_active and not filed_at_in_window(meta.get("filed_at"), since_dt, before_dt):
+        if not _metadata_in_scope(
+            meta,
+            wing=wing,
+            room=room,
+            source_file=source_file,
+            tenant_id=tenant_id,
+            namespace=namespace,
+            allowed_tags=allowed_tags,
+            since_dt=since_dt,
+            before_dt=before_dt,
+        ):
             continue
         full_source = meta.get("source_file", "") or ""
         candidates.append(
@@ -1062,7 +1153,14 @@ def _bm25_only_via_sqlite(
 
     result = {
         "query": query,
-        "filters": {"wing": wing, "room": room, "source_file": source_file},
+        "filters": {
+            "wing": wing,
+            "room": room,
+            "source_file": source_file,
+            "tenant_id": tenant_id,
+            "namespace": namespace,
+            "allowed_tags": allowed_tags,
+        },
         "total_before_filter": len(candidates),
         "results": hits,
         "fallback": "bm25_only_via_sqlite",
@@ -1343,6 +1441,9 @@ def _search_result_envelope(
     candidates_fetched: int,
     pool_size: int,
     date_window_active: bool,
+    tenant_id=None,
+    namespace=None,
+    allowed_tags=None,
 ) -> dict:
     """Assemble the ``search_memories`` response dict.
 
@@ -1359,6 +1460,9 @@ def _search_result_envelope(
             "source_file": source_file,
             "since": since,
             "before": before,
+            "tenant_id": tenant_id,
+            "namespace": namespace,
+            "allowed_tags": allowed_tags,
         },
         "total_before_filter": candidates_fetched,
         "results": hits,
@@ -1381,6 +1485,9 @@ def _window_and_fallback_gate(
     collection_name,
     source_file,
     stop_words: frozenset = frozenset(),
+    tenant_id=None,
+    namespace=None,
+    allowed_tags=None,
 ):
     """Front gate for ``search_memories``: parse the window, route the fallback.
 
@@ -1414,6 +1521,9 @@ def _window_and_fallback_gate(
                 since_dt=since_dt,
                 before_dt=before_dt,
                 stop_words=stop_words,
+                tenant_id=tenant_id,
+                namespace=namespace,
+                allowed_tags=allowed_tags,
             ),
         )
     return since_dt, before_dt, active, None
@@ -1449,6 +1559,9 @@ def _vector_disabled_with_window(
     since_dt,
     before_dt,
     stop_words: frozenset = frozenset(),
+    tenant_id: str = None,
+    namespace: str = None,
+    allowed_tags: list[str] | None = None,
 ) -> dict:
     """Run the BM25-only route and echo the raw window strings.
 
@@ -1467,6 +1580,9 @@ def _vector_disabled_with_window(
         since_dt=since_dt,
         before_dt=before_dt,
         stop_words=stop_words,
+        tenant_id=tenant_id,
+        namespace=namespace,
+        allowed_tags=allowed_tags,
     )
     if "filters" in result:
         result["filters"]["since"] = since
@@ -1486,6 +1602,9 @@ def _vector_disabled_search(
     stop_words: frozenset = frozenset(),
     since_dt=None,
     before_dt=None,
+    tenant_id: str = None,
+    namespace: str = None,
+    allowed_tags: list[str] | None = None,
 ) -> dict:
     try:
         backend_name = resolve_backend_name(palace_path)
@@ -1511,6 +1630,9 @@ def _vector_disabled_search(
         stop_words=stop_words,
         since_dt=since_dt,
         before_dt=before_dt,
+        tenant_id=tenant_id,
+        namespace=namespace,
+        allowed_tags=allowed_tags,
     )
 
 
@@ -1612,6 +1734,9 @@ def search_memories(
     candidate_strategy: str = "vector",
     collection_name: str = None,
     lang: Optional[str] = None,
+    tenant_id: str = None,
+    namespace: str = None,
+    allowed_tags: list[str] | None = None,
 ) -> dict:
     """Programmatic search — returns a dict instead of printing.
 
@@ -1665,6 +1790,9 @@ def search_memories(
             ``MEMPAL_LANG`` or ``config.json["lang"]``. Palaces without an
             explicit language skip filtering entirely, preserving pre-PR
             byte-identical scoring.
+        tenant_id: Optional exact tenant metadata scope.
+        namespace: Optional exact namespace metadata scope.
+        allowed_tags: Optional OR allowlist. ``[]`` is an explicit deny-all.
     """
     # Validate the strategy eagerly so invalid values fail the same way
     # regardless of whether the call routes through the vector path or
@@ -1688,6 +1816,9 @@ def search_memories(
         collection_name=collection_name,
         source_file=source_file,
         stop_words=stop_words,
+        tenant_id=tenant_id,
+        namespace=namespace,
+        allowed_tags=allowed_tags,
     )
     if short_circuit is not None:
         return short_circuit
@@ -1697,7 +1828,7 @@ def search_memories(
         return open_error
 
     metric = _metric_for_collection(drawers_col)
-    where = build_where_filter(wing, room, source_file)
+    where = build_where_filter(wing, room, source_file, tenant_id, namespace)
 
     # Hybrid retrieval: always query drawers directly (the floor), then use
     # closet hits to boost rankings. Closets are a ranking SIGNAL, never a
@@ -1706,7 +1837,7 @@ def search_memories(
     # This avoids the "weak-closets regression" where narrative content
     # produces low-signal closets (regex extraction matches few topics)
     # and closet-first routing hides drawers that direct search would find.
-    pool_size = _candidate_pool_size(n_results, date_window_active)
+    pool_size = _scoped_candidate_pool_size(n_results, date_window_active, allowed_tags)
     try:
         dkwargs = {
             "query_texts": [query],
@@ -1765,7 +1896,11 @@ def search_memories(
     ):
         meta = meta or {}
         doc = doc or ""
-        if _candidate_out_of_scope(dist, meta, max_distance, since_dt, before_dt):
+        if _candidate_out_of_scope(
+            dist, meta, max_distance, since_dt, before_dt
+        ) or not _metadata_in_scope(
+            meta, tenant_id=tenant_id, namespace=namespace, allowed_tags=allowed_tags
+        ):
             continue
 
         meta = meta or {}
@@ -1825,7 +1960,9 @@ def search_memories(
     # wrong chunk within it; grep picks the right one.
     MAX_HYDRATION_CHARS = 10000
     for h in hits:
-        if h["matched_via"] == "drawer":
+        # Scoped calls must never hydrate from a same-named source outside
+        # their metadata boundary. The direct hit remains verbatim and safe.
+        if h["matched_via"] == "drawer" or tenant_id or namespace or allowed_tags is not None:
             continue
         full_source = h.get("_source_file_full") or ""
         if not full_source:
@@ -1912,6 +2049,9 @@ def search_memories(
         candidates_fetched=len(_first_or_empty(drawer_results, "documents")),
         pool_size=pool_size,
         date_window_active=date_window_active,
+        tenant_id=tenant_id,
+        namespace=namespace,
+        allowed_tags=allowed_tags,
     )
 
 

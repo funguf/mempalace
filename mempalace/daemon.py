@@ -869,6 +869,24 @@ def _close_or_defer_writer_lease(
         writer_lease.close()
 
 
+def _daemon_status_payload(path: str, runtime: "DaemonRuntime") -> dict[str, Any] | None:
+    if path == "/health":
+        return {
+            "ok": True,
+            "worker_alive": runtime.worker_alive(),
+            "pid": os.getpid(),
+            "palace_path": runtime.palace_path,
+            "backend": runtime.backend,
+            "active_job_id": runtime.active_job_id,
+            "counts": runtime.store.counts(),
+        }
+    if path == "/capabilities":
+        from .service import tool_contract
+
+        return {"tool_contract": tool_contract()}
+    return None
+
+
 def run_server(palace_path: str, *, backend: str | None = None, port: int = 0) -> None:
     palace_path = canonical_palace_path(palace_path)
     previous_env = {
@@ -949,20 +967,9 @@ def run_server(palace_path: str, *, backend: str | None = None, port: int = 0) -
 
         def _handle_get(self):
             parsed = urlparse(self.path)
-            if parsed.path == "/health":
-                _json_response(
-                    self,
-                    200,
-                    {
-                        "ok": True,
-                        "worker_alive": runtime.worker_alive(),
-                        "pid": os.getpid(),
-                        "palace_path": runtime.palace_path,
-                        "backend": runtime.backend,
-                        "active_job_id": runtime.active_job_id,
-                        "counts": runtime.store.counts(),
-                    },
-                )
+            status_payload = _daemon_status_payload(parsed.path, runtime)
+            if status_payload is not None:
+                _json_response(self, 200, status_payload)
                 return
             if parsed.path == "/jobs":
                 qs = parse_qs(parsed.query)
@@ -1174,6 +1181,9 @@ class DaemonClient:
 
     def health(self, *, timeout: float = 5.0) -> dict[str, Any]:
         return self.request("GET", "/health", timeout=timeout)
+
+    def capabilities(self, *, timeout: float = 5.0) -> dict[str, Any]:
+        return self.request("GET", "/capabilities", timeout=timeout)
 
     def submit(
         self,

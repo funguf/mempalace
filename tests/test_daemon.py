@@ -133,6 +133,10 @@ def test_daemon_http_lifecycle_executes_job(tmp_path, monkeypatch):
     health = client.health()
     assert health["ok"] is True
     assert health["palace_path"] == daemon.canonical_palace_path(str(palace))
+    capabilities = client.capabilities()["tool_contract"]
+    assert capabilities["version"] == service.TOOL_CONTRACT_VERSION
+    assert "mempalace_add_drawer" in capabilities["write_tools"]
+    assert "mempalace_forget_drawers" in capabilities["write_tools"]
 
     job = client.submit("mine", {"source": "src"}, dedupe_key="job")
     finished = client.wait(job["id"], timeout=5)

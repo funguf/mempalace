@@ -75,7 +75,6 @@ READ_TOOLS = frozenset(
         "mempalace_get_drawer",
         "mempalace_list_drawers",
         "mempalace_diary_read",
-        "mempalace_memories_filed_away",
         "mempalace_kg_query",
         "mempalace_kg_stats",
         "mempalace_kg_timeline",
@@ -92,14 +91,28 @@ WRITE_TOOLS = frozenset(
         "mempalace_diary_write",
         "mempalace_kg_add",
         "mempalace_kg_invalidate",
+        "mempalace_kg_supersede",
         "mempalace_create_tunnel",
         "mempalace_delete_tunnel",
         "mempalace_delete_hallway",
         "mempalace_hook_settings",
+        "mempalace_forget_drawers",
+        "mempalace_memories_filed_away",
     }
 )
 
 MAINTENANCE_TOOLS = frozenset({"mempalace_mine", "mempalace_sync", "mempalace_reconnect"})
+TOOL_CONTRACT_VERSION = 1
+
+
+def tool_contract() -> dict[str, Any]:
+    """Versioned classification contract for authenticated write routers."""
+    return {
+        "version": TOOL_CONTRACT_VERSION,
+        "read_tools": sorted(READ_TOOLS),
+        "write_tools": sorted(WRITE_TOOLS),
+        "maintenance_tools": sorted(MAINTENANCE_TOOLS),
+    }
 
 
 def classify_tool(name: str) -> str:
@@ -428,10 +441,21 @@ def run_mcp_tool(payload: dict[str, Any]) -> dict[str, Any]:
             "error": f"daemon mcp_tool only accepts write tools; {name!r} is {classification}",
             "exit_code": 2,
         }
-    from .mcp_server import TOOLS
+    from .mcp_server import TOOLS, _mcp_diverged_index_refusal, _mcp_sqlite_integrity_refusal
 
     if name not in TOOLS:
         return {"success": False, "error": f"unknown MCP tool: {name}", "exit_code": 2}
+    for gate in (_mcp_sqlite_integrity_refusal, _mcp_diverged_index_refusal):
+        refusal = gate(0, name)
+        if refusal is not None:
+            error = refusal.get("error") or {}
+            return {
+                "success": False,
+                "error": error.get("message", "write preflight refused"),
+                "error_code": error.get("code"),
+                "details": error.get("data"),
+                "exit_code": 1,
+            }
     result = TOOLS[name]["handler"](**arguments)
     if isinstance(result, dict):
         # Several write tools signal failure with a bare {"error": ...} and no

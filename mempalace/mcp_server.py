@@ -420,6 +420,7 @@ _MUTATING_TOOLS = frozenset(
         "mempalace_delete_drawer",
         "mempalace_checkpoint",
         "mempalace_delete_by_source",
+        "mempalace_forget_drawers",
         "mempalace_mine",
         "mempalace_sync",
         "mempalace_update_drawer",
@@ -463,6 +464,7 @@ _VECTOR_WRITE_TOOLS = frozenset(
         "mempalace_update_drawer",
         "mempalace_delete_drawer",
         "mempalace_delete_by_source",
+        "mempalace_forget_drawers",
         "mempalace_diary_write",
         "mempalace_checkpoint",
         "mempalace_mine",
@@ -2373,12 +2375,21 @@ def tool_search(
     max_distance: float = 1.5,
     min_similarity: float = None,
     context: str = None,
+    tenant_id: str = None,
+    namespace: str = None,
+    allowed_tags: list[str] | None = None,
 ):
     limit = max(1, min(limit, _MAX_RESULTS))
     try:
         wing = _sanitize_optional_name(wing, "wing")
         room = _sanitize_optional_name(room, "room")
         source_file = _sanitize_optional_source_file(source_file)
+        if tenant_id is not None:
+            tenant_id = sanitize_kg_value(tenant_id, "tenant_id")
+        if namespace is not None:
+            namespace = sanitize_name(namespace, "namespace")
+        if allowed_tags is not None:
+            allowed_tags = _validated_tags(allowed_tags)
     except ValueError as e:
         return {"error": str(e)}
     # since/before are validated inside search_memories (shared
@@ -2406,6 +2417,9 @@ def tool_search(
         max_distance=dist,
         vector_disabled=_vector_disabled,
         collection_name=_config.collection_name,
+        tenant_id=tenant_id,
+        namespace=namespace,
+        allowed_tags=allowed_tags,
     )
     if _is_transient_index_error(result):
         # Post-bulk-write HNSW flush window (#1315): drop caches, give
@@ -2914,8 +2928,48 @@ def _build_chunk_rows(drawer_id: str, content: str, meta: dict, chunk_size: int)
     return chunk_ids, chunk_docs, chunk_metas
 
 
+_SIDECAR_PII_PATTERNS = (
+    ("private_key", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----")),
+    ("ssn", re.compile(r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)")),
+    ("credit_card", re.compile(r"(?<!\d)(?:\d[ -]?){13,19}(?!\d)")),
+    ("api_key", re.compile(r"\b(?:sk|api)[-_][A-Za-z0-9_-]{16,}\b", re.IGNORECASE)),
+    ("password_phrase", re.compile(r"\bpassword\s*[:=]\s*\S+", re.IGNORECASE)),
+)
+
+
+def _sidecar_pii_pattern(content: str) -> str | None:
+    for label, pattern in _SIDECAR_PII_PATTERNS:
+        if pattern.search(content):
+            return label
+    return None
+
+
+def _validated_tags(tags: list[str] | None) -> list[str]:
+    if tags is None:
+        return []
+    if not isinstance(tags, list) or len(tags) > 32:
+        raise ValueError("tags must be a list of at most 32 strings")
+    out = []
+    for tag in tags:
+        if not isinstance(tag, str) or not tag or len(tag) > 64:
+            raise ValueError("each tag must be a non-empty string of at most 64 characters")
+        out.append(strip_lone_surrogates(tag))
+    return out
+
+
 def tool_add_drawer(
-    wing: str, room: str, content: str, source_file: str = None, added_by: str = "mcp"
+    wing: str,
+    room: str,
+    content: str,
+    source_file: str = None,
+    added_by: str = "mcp",
+    tenant_id: str = None,
+    chat_id: str = None,
+    message_id: str = None,
+    namespace: str = None,
+    tags: list[str] | None = None,
+    written_by: str = None,
+    written_from: str = None,
 ):
     """File verbatim content into a wing/room. Checks for duplicates first.
 
@@ -2934,17 +2988,47 @@ def tool_add_drawer(
         wing = sanitize_name(wing, "wing")
         room = sanitize_name(room, "room")
         content = sanitize_content(content)
+        if tenant_id is not None:
+            tenant_id = sanitize_kg_value(tenant_id, "tenant_id")
+        if chat_id is not None:
+            chat_id = sanitize_kg_value(chat_id, "chat_id")
+        if message_id is not None:
+            message_id = sanitize_kg_value(message_id, "message_id")
+        if namespace is not None:
+            namespace = sanitize_name(namespace, "namespace")
+        tags = _validated_tags(tags)
         if source_file:
             source_file = strip_lone_surrogates(source_file)
         added_by = strip_lone_surrogates(added_by)
+        if written_by is not None:
+            written_by = sanitize_kg_value(written_by, "written_by")
+        if written_from is not None:
+            written_from = sanitize_kg_value(written_from, "written_from")
     except ValueError as e:
         return {"success": False, "error": str(e)}
+
+    pii_pattern = _sidecar_pii_pattern(content)
+    if pii_pattern:
+        logger.warning("PII deny-list rejected add_drawer category=%s", pii_pattern)
+        return {
+            "success": False,
+            "error": "content rejected by PII deny-list",
+            "error_code": "pii",
+            "pattern_type": pii_pattern,
+        }
 
     col = _get_collection(create=True)
     if not col:
         return _collection_error_or_no_palace()
 
-    drawer_id = make_drawer_id_from_content(wing, room, content)
+    if tenant_id and chat_id and message_id:
+        identity = f"{tenant_id}\x00{chat_id}\x00{message_id}".encode()
+        drawer_id = f"drawer_{wing}_{room}_{hashlib.sha256(identity).hexdigest()[:24]}"
+    elif tenant_id:
+        identity = f"{tenant_id}\x00{wing}\x00{room}\x00{content}".encode()
+        drawer_id = f"drawer_{wing}_{room}_{hashlib.sha256(identity).hexdigest()[:24]}"
+    else:
+        drawer_id = make_drawer_id_from_content(wing, room, content)
 
     _wal_log(
         "add_drawer",
@@ -2967,6 +3051,19 @@ def tool_add_drawer(
         "filed_at": datetime.now().isoformat(),
         "id_recipe": ID_RECIPE,
     }
+    optional_meta = {
+        "tenant_id": tenant_id,
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "namespace": namespace,
+        "written_by": written_by,
+        "written_from": written_from,
+    }
+    base_meta.update({key: value for key, value in optional_meta.items() if value is not None})
+    if tags:
+        # Chroma metadata is scalar-valued; JSON preserves exact tags without
+        # delimiter ambiguity and the search path decodes this representation.
+        base_meta["tags_json"] = json.dumps(tags, ensure_ascii=False)
 
     # Idempotency. Three cases to detect a prior committed write:
     # (a) Single-doc path: drawer_id row exists (the only id used).
@@ -3088,6 +3185,51 @@ def tool_delete_drawer(drawer_id: str):
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+def tool_forget_drawers(tenant_id: str, chat_id: str, namespace: str = None):
+    """Delete only drawers belonging to one authenticated chat scope."""
+    global _metadata_cache
+    try:
+        tenant_id = sanitize_kg_value(tenant_id, "tenant_id")
+        chat_id = sanitize_kg_value(chat_id, "chat_id")
+        if namespace is not None:
+            namespace = sanitize_name(namespace, "namespace")
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}
+
+    col = _get_collection()
+    if not col:
+        return _collection_error_or_no_palace()
+
+    clauses = [{"tenant_id": tenant_id}, {"chat_id": chat_id}]
+    if namespace is not None:
+        clauses.append({"namespace": namespace})
+    where = {"$and": clauses}
+    try:
+        found = col.get(where=where, include=["metadatas"])
+        ids = _get_result_ids(found)
+        if not ids:
+            return {"success": True, "deleted": 0}
+        metadatas = found.get("metadatas") or []
+        logical_ids = {
+            (meta or {}).get("parent_drawer_id") or drawer_id
+            for drawer_id, meta in zip(ids, metadatas)
+        }
+        col.delete(ids=ids)
+        _metadata_cache = None
+        _wal_log(
+            "forget_drawers",
+            {
+                "tenant_id": tenant_id,
+                "chat_id": chat_id,
+                "namespace": namespace,
+                "deleted_ids": ids,
+            },
+        )
+        return {"success": True, "deleted": len(logical_ids)}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
 
 
 class _ProtocolStdoutRestoreFailure(BaseException):
@@ -4988,6 +5130,13 @@ TOOLS = {
                     "type": "string",
                     "description": "Background context for the search (optional). NOT used for embedding — only for future re-ranking.",
                 },
+                "tenant_id": {"type": "string", "description": "Exact tenant scope."},
+                "namespace": {"type": "string", "description": "Exact namespace scope."},
+                "allowed_tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "OR tag allowlist; an empty list denies all.",
+                },
             },
             "required": ["query"],
         },
@@ -5024,10 +5173,30 @@ TOOLS = {
                 },
                 "source_file": {"type": "string", "description": "Where this came from (optional)"},
                 "added_by": {"type": "string", "description": "Who is filing this (default: mcp)"},
+                "tenant_id": {"type": "string"},
+                "chat_id": {"type": "string"},
+                "message_id": {"type": "string"},
+                "namespace": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "written_by": {"type": "string"},
+                "written_from": {"type": "string"},
             },
             "required": ["wing", "room", "content"],
         },
         "handler": tool_add_drawer,
+    },
+    "mempalace_forget_drawers": {
+        "description": "Delete memories scoped to one tenant and chat, optionally one namespace.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tenant_id": {"type": "string"},
+                "chat_id": {"type": "string"},
+                "namespace": {"type": "string"},
+            },
+            "required": ["tenant_id", "chat_id"],
+        },
+        "handler": tool_forget_drawers,
     },
     "mempalace_checkpoint": {
         "description": "Save a whole session in one call: semantic-dedups each item, files non-duplicates as drawers, then writes one diary entry. Use this instead of many separate check_duplicate/add_drawer/diary_write calls — it renders as a single tool-call card in the host UI.",
