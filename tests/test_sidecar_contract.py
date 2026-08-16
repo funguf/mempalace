@@ -129,12 +129,18 @@ def test_search_scope_and_tag_contract_helpers():
 
 def test_daemon_write_contract_covers_sidecar_mutations():
     contract = service.tool_contract()
-    assert contract["version"] == 1
+    assert contract["version"] == 2
     assert {
         "mempalace_add_drawer",
         "mempalace_forget_drawers",
         "mempalace_delete_drawer",
         "mempalace_memories_filed_away",
+        "mempalace_event_append",
+        "mempalace_event_ack",
+        "mempalace_artifact_put",
+        "mempalace_patch_submit",
     } <= set(contract["write_tools"])
-    assert service.WRITE_TOOLS <= set(mcp_server.TOOLS)
+    assert service.READ_TOOLS | service.WRITE_TOOLS | service.MAINTENANCE_TOOLS == set(
+        mcp_server.TOOLS
+    )
     assert not service.READ_TOOLS.intersection(service.WRITE_TOOLS)

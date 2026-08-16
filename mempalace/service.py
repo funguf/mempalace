@@ -78,6 +78,10 @@ READ_TOOLS = frozenset(
         "mempalace_kg_query",
         "mempalace_kg_stats",
         "mempalace_kg_timeline",
+        "mempalace_mesh_peers",
+        "mempalace_event_list",
+        "mempalace_event_wait",
+        "mempalace_artifact_get",
     }
 )
 
@@ -98,11 +102,15 @@ WRITE_TOOLS = frozenset(
         "mempalace_hook_settings",
         "mempalace_forget_drawers",
         "mempalace_memories_filed_away",
+        "mempalace_event_append",
+        "mempalace_event_ack",
+        "mempalace_artifact_put",
+        "mempalace_patch_submit",
     }
 )
 
 MAINTENANCE_TOOLS = frozenset({"mempalace_mine", "mempalace_sync", "mempalace_reconnect"})
-TOOL_CONTRACT_VERSION = 1
+TOOL_CONTRACT_VERSION = 2
 
 
 def tool_contract() -> dict[str, Any]:
