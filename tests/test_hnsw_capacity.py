@@ -231,6 +231,20 @@ def test_capacity_status_flags_severe_divergence(tmp_path):
     assert "repair" in info["message"].lower()
 
 
+def test_capacity_status_flags_quarantined_unflushed_segment(tmp_path):
+    seg = "seg-quarantined"
+    _seed_chroma_db(str(tmp_path), sqlite_count=10_000, segment_id=seg)
+    (tmp_path / seg).mkdir()
+    (tmp_path / f"{seg}.corrupt-20260816-010203").mkdir()
+
+    info = hnsw_capacity_status(str(tmp_path), COLLECTION)
+
+    assert info["diverged"] is True
+    assert info["status"] == "diverged"
+    assert info["divergence"] == 10_000
+    assert "quarantined" in info["message"]
+
+
 def test_capacity_status_tolerates_flush_lag(tmp_path):
     """A few hundred entries behind sqlite is normal post-mine state."""
     seg = "seg-lag"

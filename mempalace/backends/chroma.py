@@ -1019,6 +1019,29 @@ def _hnsw_capacity_status_uncached(
         out["hnsw_metadata_age_seconds"] = metadata_age_seconds
 
         if hnsw_count is None:
+            # A quarantined copy of this exact segment is conclusive even
+            # when the replacement directory has not flushed metadata yet.
+            # Leaving vectors enabled here makes Chroma reopen the empty or
+            # incomplete replacement and fail queries with "Error finding
+            # id". Route to the existing BM25 fallback until repair rebuilds
+            # the vector index.
+            try:
+                quarantined = any(
+                    name.startswith(f"{seg_id}.corrupt-") or name.startswith(f"{seg_id}.drift-")
+                    for name in os.listdir(palace_path)
+                )
+            except OSError:
+                quarantined = False
+            if sqlite_count > 0 and quarantined:
+                out["divergence"] = sqlite_count
+                out["status"] = "diverged"
+                out["diverged"] = True
+                out["message"] = (
+                    "HNSW segment is quarantined and its replacement has no "
+                    "flushed metadata; run `mempalace repair` to rebuild vectors"
+                )
+                return out
+
             # No pickle yet, so this probe cannot measure HNSW capacity.
             # Chroma 1.5.x can have binary HNSW files without a flushed
             # metadata pickle; absence of the pickle alone is not proof that
