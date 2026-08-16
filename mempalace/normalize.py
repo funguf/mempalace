@@ -340,15 +340,48 @@ def _try_claude_code_jsonl(content: str) -> Optional[str]:
     return None
 
 
+def _codex_response_message(payload: object) -> Optional[tuple[str, str]]:
+    """Extract a conversational turn from a current Codex response item."""
+    if not isinstance(payload, dict) or payload.get("type") != "message":
+        return None
+
+    role = payload.get("role")
+    if role not in ("user", "assistant"):
+        return None
+
+    content = payload.get("content", [])
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        allowed_types = {"input_text", "output_text", "text"}
+        text = "\n".join(
+            block.get("text", "")
+            for block in content
+            if isinstance(block, dict)
+            and block.get("type") in allowed_types
+            and isinstance(block.get("text"), str)
+        )
+    else:
+        return None
+
+    text = text.strip()
+    if not text:
+        return None
+    if role == "user" and text.startswith("<environment_context>"):
+        return None
+    return role, text
+
+
 def _try_codex_jsonl(content: str) -> Optional[str]:
     """OpenAI Codex CLI sessions (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl).
 
-    Uses only event_msg entries (user_message / agent_message) which represent
-    the canonical conversation turns. response_item entries are skipped because
-    they include synthetic context injections and duplicate the real messages.
+    Supports legacy ``event_msg`` turns and current role-bearing
+    ``response_item`` messages. Legacy turns win when both are present so a
+    mixed transcript is not duplicated. Developer/runtime records are ignored.
     """
     lines = [line.strip() for line in content.strip().split("\n") if line.strip()]
-    messages = []
+    legacy_messages = []
+    response_messages = []
     has_session_meta = False
     for line in lines:
         try:
@@ -363,10 +396,17 @@ def _try_codex_jsonl(content: str) -> Optional[str]:
             has_session_meta = True
             continue
 
+        payload = entry.get("payload", {})
+
+        if entry_type == "response_item":
+            turn = _codex_response_message(payload)
+            if turn is not None:
+                response_messages.append(turn)
+            continue
+
         if entry_type != "event_msg":
             continue
 
-        payload = entry.get("payload", {})
         if not isinstance(payload, dict):
             continue
 
@@ -379,10 +419,11 @@ def _try_codex_jsonl(content: str) -> Optional[str]:
             continue
 
         if payload_type == "user_message":
-            messages.append(("user", text))
+            legacy_messages.append(("user", text))
         elif payload_type == "agent_message":
-            messages.append(("assistant", text))
+            legacy_messages.append(("assistant", text))
 
+    messages = legacy_messages if len(legacy_messages) >= 2 else response_messages
     if len(messages) >= 2 and has_session_meta:
         return _messages_to_transcript(messages)
     return None

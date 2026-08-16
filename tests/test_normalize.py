@@ -7,6 +7,7 @@ from mempalace.normalize import (
     _extract_content,
     _format_tool_result,
     _format_tool_use,
+    _codex_response_message,
     _messages_to_transcript,
     _try_chatgpt_export_json_split,
     _try_chatgpt_json,
@@ -401,6 +402,80 @@ def test_codex_jsonl_valid():
     result = _try_codex_jsonl("\n".join(lines))
     assert result is not None
     assert "> Q" in result
+
+
+def test_codex_jsonl_current_response_item_messages():
+    lines = [
+        json.dumps({"type": "session_meta", "payload": {"id": "s1"}}),
+        json.dumps(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Current question"}],
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Current answer"}],
+                },
+            }
+        ),
+    ]
+
+    assert _try_codex_jsonl("\n".join(lines)) == "> Current question\nCurrent answer\n"
+
+
+def test_codex_response_message_filters_runtime_context():
+    assert (
+        _codex_response_message(
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "<environment_context>noise"}],
+            }
+        )
+        is None
+    )
+    assert (
+        _codex_response_message(
+            {
+                "type": "message",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": "runtime instructions"}],
+            }
+        )
+        is None
+    )
+
+
+def test_codex_jsonl_legacy_messages_take_precedence():
+    lines = [
+        json.dumps({"type": "session_meta", "payload": {"id": "s1"}}),
+        json.dumps(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "duplicate question"}],
+                },
+            }
+        ),
+        json.dumps({"type": "event_msg", "payload": {"type": "user_message", "message": "Q"}}),
+        json.dumps({"type": "event_msg", "payload": {"type": "agent_message", "message": "A"}}),
+    ]
+
+    result = _try_codex_jsonl("\n".join(lines))
+
+    assert result == "> Q\nA\n"
+    assert "duplicate question" not in result
 
 
 def test_codex_jsonl_no_session_meta():
