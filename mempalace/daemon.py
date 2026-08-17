@@ -85,6 +85,27 @@ SHUTDOWN_DRAIN_SECONDS = 10.0
 # holds verbatim payloads) doesn't grow without bound across a long-lived
 # daemon. Override via env for operators who want a longer/shorter window.
 JOB_RETENTION_DAYS = int(os.environ.get("MEMPALACE_DAEMON_RETENTION_DAYS", "7") or "7")
+_DEFAULT_COMPLETED_DEDUPE_SECONDS = 24.0 * 60.0 * 60.0
+
+
+def _completed_dedupe_seconds() -> float:
+    """Return the replay window for successful jobs with a stable dedupe key."""
+    try:
+        value = float(
+            os.environ.get("MEMPALACE_DAEMON_DEDUPE_WINDOW_SECONDS", "")
+            or _DEFAULT_COMPLETED_DEDUPE_SECONDS
+        )
+    except ValueError:
+        return _DEFAULT_COMPLETED_DEDUPE_SECONDS
+    if not math.isfinite(value) or value < 0:
+        return _DEFAULT_COMPLETED_DEDUPE_SECONDS
+    return value
+
+
+# Reusing a recent successful job returns its recorded result without creating
+# another audit row. Zero disables terminal-job replay while retaining the
+# existing queued/running dedupe behavior.
+COMPLETED_DEDUPE_SECONDS = _completed_dedupe_seconds()
 try:
     import fcntl as _fcntl  # POSIX only; absent on Windows
 except ImportError:  # pragma: no cover - Windows fallback
@@ -410,6 +431,24 @@ class QueueStore:
                 ).fetchone()
                 if row is not None:
                     return self._row_to_job(row)
+                if COMPLETED_DEDUPE_SECONDS > 0:
+                    cutoff = (
+                        datetime.now(timezone.utc) - timedelta(seconds=COMPLETED_DEDUPE_SECONDS)
+                    ).isoformat()
+                    row = conn.execute(
+                        """
+                        SELECT * FROM jobs
+                        WHERE dedupe_key = ?
+                          AND state = 'succeeded'
+                          AND finished_at IS NOT NULL
+                          AND finished_at >= ?
+                        ORDER BY finished_at DESC
+                        LIMIT 1
+                        """,
+                        (dedupe_key, cutoff),
+                    ).fetchone()
+                    if row is not None:
+                        return self._row_to_job(row)
 
             job_id = uuid.uuid4().hex
             try:

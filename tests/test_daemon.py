@@ -121,6 +121,59 @@ def test_queue_dedupes_and_recovers_running_jobs(tmp_path, monkeypatch):
     assert store.get(first.id).state == "queued"
 
 
+def test_queue_replays_recent_success_for_stable_dedupe_key(tmp_path, monkeypatch):
+    monkeypatch.setenv(daemon.STATE_ROOT_ENV, str(tmp_path / "state"))
+    monkeypatch.setattr(daemon, "COMPLETED_DEDUPE_SECONDS", 24 * 60 * 60)
+    palace = tmp_path / "palace"
+    palace.mkdir()
+    store = daemon.QueueStore(daemon.queue_path(str(palace)))
+
+    first = store.enqueue("mcp_tool", {"message_id": "m1"}, dedupe_key="stable")
+    store.finish(first.id, state="succeeded", result={"success": True, "drawer_id": "d1"})
+    replay = store.enqueue("mcp_tool", {"message_id": "m1"}, dedupe_key="stable")
+
+    assert replay.id == first.id
+    assert replay.state == "succeeded"
+    assert replay.result == {"success": True, "drawer_id": "d1"}
+    assert len(store.list()) == 1
+
+
+def test_queue_allows_retry_after_completed_dedupe_window(tmp_path, monkeypatch):
+    monkeypatch.setenv(daemon.STATE_ROOT_ENV, str(tmp_path / "state"))
+    monkeypatch.setattr(daemon, "COMPLETED_DEDUPE_SECONDS", 24 * 60 * 60)
+    palace = tmp_path / "palace"
+    palace.mkdir()
+    store = daemon.QueueStore(daemon.queue_path(str(palace)))
+
+    first = store.enqueue("mcp_tool", {"message_id": "m1"}, dedupe_key="stable")
+    store.finish(first.id, state="succeeded", result={"success": True})
+    from datetime import datetime, timedelta, timezone
+
+    expired = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+    with store._lock, store._connect() as conn:
+        conn.execute("UPDATE jobs SET finished_at = ? WHERE id = ?", (expired, first.id))
+
+    retry = store.enqueue("mcp_tool", {"message_id": "m1"}, dedupe_key="stable")
+
+    assert retry.id != first.id
+    assert retry.state == "queued"
+
+
+def test_queue_does_not_replay_failed_job(tmp_path, monkeypatch):
+    monkeypatch.setenv(daemon.STATE_ROOT_ENV, str(tmp_path / "state"))
+    monkeypatch.setattr(daemon, "COMPLETED_DEDUPE_SECONDS", 24 * 60 * 60)
+    palace = tmp_path / "palace"
+    palace.mkdir()
+    store = daemon.QueueStore(daemon.queue_path(str(palace)))
+
+    first = store.enqueue("mcp_tool", {"message_id": "m1"}, dedupe_key="stable")
+    store.finish(first.id, state="failed", result={"success": False})
+    retry = store.enqueue("mcp_tool", {"message_id": "m1"}, dedupe_key="stable")
+
+    assert retry.id != first.id
+    assert retry.state == "queued"
+
+
 def test_daemon_http_lifecycle_executes_job(tmp_path, monkeypatch):
     calls = []
 
